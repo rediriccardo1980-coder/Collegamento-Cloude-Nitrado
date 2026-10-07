@@ -76,6 +76,23 @@ async def _upload(client: httpx.AsyncClient, path: str, content: str) -> None:
 
 
 @mcp.tool()
+async def server_info() -> str:
+    """Mostra utente e percorso base del server Nitrado (serve per trovare i
+    percorsi assoluti dei file). Non mostra password né token."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{API}/services/{SERVICE_ID}/gameservers", headers=HEADERS)
+        r.raise_for_status()
+        gs = r.json()["data"]["gameserver"]
+    gsp = gs.get("game_specific") or {}
+    return (
+        f"username: {gs.get('username')}\n"
+        f"path: {gsp.get('path')}\n"
+        f"game: {gs.get('game')}\n"
+        f"status: {gs.get('status')}"
+    )
+
+
+@mcp.tool()
 async def list_files(directory: str = ALLOWED_ROOT) -> str:
     """Elenca file e cartelle in una cartella del server Nitrado."""
     directory = _check_path(directory, must_have_ext=False)
