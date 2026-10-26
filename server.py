@@ -17,12 +17,12 @@ from ftplib import FTP, all_errors
 from mcp.server.fastmcp import FastMCP
 
 READ_ONLY = os.environ.get("READ_ONLY", "true").strip().lower() != "false"
-SECRET = os.environ.get("SECRET_PATH", "").strip().strip("/")
+SECRET = (os.environ.get("SECRET_PATH") or os.environ.get("MCP_SECRET") or "").strip().strip("/")
 PORT = int(os.environ.get("PORT", "10000"))
 MAX_CHARS = 100_000  # caratteri massimi restituiti per ogni lettura
 
 if not SECRET:
-    raise SystemExit("Imposta la variabile d'ambiente SECRET_PATH (stringa lunga e casuale).")
+    raise SystemExit("Imposta SECRET_PATH oppure MCP_SECRET (stringa lunga e casuale).")
 
 
 def load_servers():
