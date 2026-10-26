@@ -5,11 +5,13 @@ Connettore MCP per i server Nitrado (DayZ console) tramite FTP.
 - Ogni modifica crea prima una copia di backup accanto al file originale.
 - Le credenziali NON stanno nel codice: solo variabili d'ambiente su Render.
 - READ_ONLY=true (default) blocca ogni scrittura. Mettilo a false per abilitarla.
+- Include log di diagnostica dettagliati per analizzare errori di timeout e connessione.
 """
 
 import io
 import os
 import posixpath
+import sys
 import time
 from contextlib import contextmanager
 from ftplib import FTP, all_errors
@@ -26,6 +28,11 @@ if not SECRET:
     raise SystemExit("Imposta SECRET_PATH oppure MCP_SECRET (stringa lunga e casuale).")
 
 
+def log(msg: str):
+    """Stampa immediatamente nei log di Render."""
+    print(f"[FTP-DEBUG] {msg}", file=sys.stdout, flush=True)
+
+
 def load_servers():
     servers = {}
     for i in range(1, 10):
@@ -34,10 +41,10 @@ def load_servers():
             continue
         name = os.environ.get(f"S{i}_NAME", f"server{i}").strip().lower()
         servers[name] = {
-            "host": host,
+            "host": host.strip(),
             "port": int(os.environ.get(f"S{i}_PORT", "21")),
-            "user": os.environ.get(f"S{i}_USER", ""),
-            "password": os.environ.get(f"S{i}_PASS", ""),
+            "user": os.environ.get(f"S{i}_USER", "").strip(),
+            "password": os.environ.get(f"S{i}_PASS", "").strip(),
         }
     return servers
 
@@ -78,18 +85,32 @@ def _ftp(server: str):
     cfg = SERVERS.get(server.strip().lower())
     if not cfg:
         raise ValueError(f"Server sconosciuto: {server}. Disponibili: {', '.join(SERVERS) or 'nessuno'}")
+    
+    log(f"Tentativo di connessione a {server} -> Host: '{cfg['host']}', Porta: {cfg['port']}, User: '{cfg['user']}'")
     ftp = FTP()
     ftp.encoding = "utf-8"
-    ftp.connect(cfg["host"], cfg["port"], timeout=TIMEOUT)
-    ftp.login(cfg["user"], cfg["password"])
-    ftp.set_pasv(True)
     try:
+        t0 = time.time()
+        ftp.connect(cfg["host"], cfg["port"], timeout=TIMEOUT)
+        log(f"Connesso a {cfg['host']}:{cfg['port']} in {time.time() - t0:.2f}s")
+        
+        t1 = time.time()
+        ftp.login(cfg["user"], cfg["password"])
+        log(f"Login riuscito per {cfg['user']} in {time.time() - t1:.2f}s")
+        
+        ftp.set_pasv(True)
+        log("Modalità PASV attivata.")
         yield ftp
+    except Exception as e:
+        log(f"ERRORE FTP su {server} ({cfg['host']}): {type(e).__name__}: {e}")
+        raise
     finally:
         try:
             ftp.quit()
+            log("Connessione FTP chiusa regolarmente.")
         except all_errors:
             ftp.close()
+            log("Connessione FTP forzata alla chiusura.")
 
 
 def _download(ftp: FTP, path: str) -> bytes:
@@ -134,6 +155,7 @@ def _decode(data: bytes) -> str:
 @mcp.tool()
 def list_servers() -> str:
     """Elenca i server Nitrado configurati e se il connettore è in sola lettura."""
+    log(f"Esecuzione list_servers. Server registrati: {list(SERVERS.keys())}")
     if not SERVERS:
         return "Nessun server configurato (controlla le variabili S1_HOST, S1_USER, ...)."
     mode = "SOLA LETTURA" if READ_ONLY else "lettura e scrittura"
@@ -147,25 +169,38 @@ def test_connection(server: str) -> str:
     if not cfg:
         return f"Server sconosciuto: {server}. Disponibili: {', '.join(SERVERS) or 'nessuno'}"
     steps = []
+    log(f"[TEST] Inizio test diagnostico su server '{server}' ({cfg['host']}:{cfg['port']})")
     ftp = FTP()
     ftp.encoding = "utf-8"
     try:
         t = time.time()
+        steps.append(f"0. Parametri: Host='{cfg['host']}', Porta={cfg['port']}, User='{cfg['user']}'")
         ftp.connect(cfg["host"], cfg["port"], timeout=TIMEOUT)
-        steps.append(f"1. Connessione a {cfg['host']}:{cfg['port']} OK ({time.time() - t:.1f}s)")
+        steps.append(f"1. Connessione TCP a {cfg['host']}:{cfg['port']} OK ({time.time() - t:.1f}s)")
+        log(steps[-1])
+        
+        t = time.time()
         ftp.login(cfg["user"], cfg["password"])
-        steps.append("2. Login OK")
+        steps.append(f"2. Login OK ({time.time() - t:.1f}s)")
+        log(steps[-1])
+        
         steps.append(f"3. Cartella corrente: {ftp.pwd()}")
+        log(steps[-1])
+        
         ftp.set_pasv(True)
         lines = []
+        t = time.time()
         ftp.retrlines("LIST", lines.append)
-        steps.append(f"4. Elenco OK ({len(lines)} voci)")
-    except Exception as e:  # noqa: BLE001 - serve il messaggio per la diagnosi
-        steps.append(f"ERRORE al passo {len(steps) + 1}: {type(e).__name__}: {e}")
+        steps.append(f"4. Elenco directory PASV OK ({len(lines)} voci in {time.time() - t:.1f}s)")
+        log(steps[-1])
+    except Exception as e:
+        err_msg = f"ERRORE al passo {len(steps)}: {type(e).__name__}: {e}"
+        steps.append(err_msg)
+        log(f"[TEST FAIL] {err_msg}")
     finally:
         try:
             ftp.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return "\n".join(steps)
 
@@ -174,6 +209,7 @@ def test_connection(server: str) -> str:
 def list_files(server: str, path: str = "/") -> str:
     """Elenca file e cartelle di un percorso FTP del server indicato."""
     p = _clean(path)
+    log(f"Esecuzione list_files su '{server}', percorso: {p}")
     with _ftp(server) as ftp:
         try:
             rows = []
@@ -183,7 +219,8 @@ def list_files(server: str, path: str = "/") -> str:
                 kind = "DIR " if facts.get("type") == "dir" else "FILE"
                 rows.append(f"{kind} {name}  {facts.get('size', '')}")
             return "\n".join(sorted(rows)) or "(vuota)"
-        except all_errors:
+        except all_errors as e:
+            log(f"mlsd fallito su {p} ({e}), riprovo con LIST standard.")
             lines = []
             ftp.retrlines(f"LIST {p}", lines.append)
             return "\n".join(lines) or "(vuota)"
@@ -194,6 +231,7 @@ def read_file(server: str, path: str, offset: int = 0, length: int = MAX_CHARS) 
     """Legge un file di testo. Per file grandi usa offset/length per leggere a blocchi."""
     p = _clean(path)
     length = max(1, min(length, MAX_CHARS))
+    log(f"Esecuzione read_file su '{server}', percorso: {p}")
     with _ftp(server) as ftp:
         text = _decode(_download(ftp, p))
     chunk = text[offset: offset + length]
@@ -208,6 +246,7 @@ def read_file(server: str, path: str, offset: int = 0, length: int = MAX_CHARS) 
 def find_in_file(server: str, path: str, query: str, context_lines: int = 2, max_matches: int = 20) -> str:
     """Cerca un testo (senza distinguere maiuscole) in un file e mostra le righe intorno."""
     p = _clean(path)
+    log(f"Esecuzione find_in_file su '{server}', file: {p}, ricerca: '{query}'")
     with _ftp(server) as ftp:
         lines = _decode(_download(ftp, p)).splitlines()
     q = query.lower()
@@ -232,6 +271,7 @@ def write_file(server: str, path: str, content: str) -> str:
     Nota: fermare il server di gioco prima di modificare i file della missione."""
     _require_write()
     p = _clean(path)
+    log(f"Esecuzione write_file su '{server}', percorso: {p}")
     with _ftp(server) as ftp:
         backup = _safe_write(ftp, p, content.encode("utf-8"))
     return f"File scritto e verificato: {p}" + (f"\nBackup: {backup}" if backup else "\n(nuovo file, nessun backup)")
@@ -242,6 +282,7 @@ def replace_in_file(server: str, path: str, old: str, new: str) -> str:
     """Sostituisce un testo esatto (deve comparire una sola volta) senza riscrivere tutto il file. Crea un backup."""
     _require_write()
     p = _clean(path)
+    log(f"Esecuzione replace_in_file su '{server}', percorso: {p}")
     with _ftp(server) as ftp:
         text = _decode(_download(ftp, p))
         n = text.count(old)
@@ -256,6 +297,7 @@ def make_dir(server: str, path: str) -> str:
     """Crea una cartella."""
     _require_write()
     p = _clean(path)
+    log(f"Esecuzione make_dir su '{server}', percorso: {p}")
     with _ftp(server) as ftp:
         ftp.mkd(p)
     return f"Cartella creata: {p}"
@@ -266,6 +308,7 @@ def move_file(server: str, source: str, destination: str) -> str:
     """Sposta o rinomina un file o una cartella."""
     _require_write()
     s, d = _clean(source), _clean(destination)
+    log(f"Esecuzione move_file su '{server}', da {s} a {d}")
     with _ftp(server) as ftp:
         if _exists(ftp, d):
             raise FileExistsError(f"La destinazione esiste già: {d}")
@@ -279,6 +322,7 @@ def delete_file(server: str, path: str) -> str:
     _require_write()
     p = _clean(path)
     new_name = f"{p}.deleted-{_ts()}"
+    log(f"Esecuzione delete_file su '{server}', percorso originale: {p}")
     with _ftp(server) as ftp:
         ftp.rename(p, new_name)
     return f"File messo da parte (recuperabile): {new_name}"
