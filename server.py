@@ -20,6 +20,7 @@ READ_ONLY = os.environ.get("READ_ONLY", "true").strip().lower() != "false"
 SECRET = (os.environ.get("SECRET_PATH") or os.environ.get("MCP_SECRET") or "").strip().strip("/")
 PORT = int(os.environ.get("PORT", "10000"))
 MAX_CHARS = 100_000  # caratteri massimi restituiti per ogni lettura
+TIMEOUT = int(os.environ.get("FTP_TIMEOUT", "12"))  # secondi
 
 if not SECRET:
     raise SystemExit("Imposta SECRET_PATH oppure MCP_SECRET (stringa lunga e casuale).")
@@ -79,7 +80,7 @@ def _ftp(server: str):
         raise ValueError(f"Server sconosciuto: {server}. Disponibili: {', '.join(SERVERS) or 'nessuno'}")
     ftp = FTP()
     ftp.encoding = "utf-8"
-    ftp.connect(cfg["host"], cfg["port"], timeout=30)
+    ftp.connect(cfg["host"], cfg["port"], timeout=TIMEOUT)
     ftp.login(cfg["user"], cfg["password"])
     ftp.set_pasv(True)
     try:
@@ -137,6 +138,36 @@ def list_servers() -> str:
         return "Nessun server configurato (controlla le variabili S1_HOST, S1_USER, ...)."
     mode = "SOLA LETTURA" if READ_ONLY else "lettura e scrittura"
     return f"Modalità: {mode}\nServer: " + ", ".join(SERVERS)
+
+
+@mcp.tool()
+def test_connection(server: str) -> str:
+    """Prova la connessione FTP passo per passo (connessione, login, cartella, elenco) per capire dove si blocca."""
+    cfg = SERVERS.get(server.strip().lower())
+    if not cfg:
+        return f"Server sconosciuto: {server}. Disponibili: {', '.join(SERVERS) or 'nessuno'}"
+    steps = []
+    ftp = FTP()
+    ftp.encoding = "utf-8"
+    try:
+        t = time.time()
+        ftp.connect(cfg["host"], cfg["port"], timeout=TIMEOUT)
+        steps.append(f"1. Connessione a {cfg['host']}:{cfg['port']} OK ({time.time() - t:.1f}s)")
+        ftp.login(cfg["user"], cfg["password"])
+        steps.append("2. Login OK")
+        steps.append(f"3. Cartella corrente: {ftp.pwd()}")
+        ftp.set_pasv(True)
+        lines = []
+        ftp.retrlines("LIST", lines.append)
+        steps.append(f"4. Elenco OK ({len(lines)} voci)")
+    except Exception as e:  # noqa: BLE001 - serve il messaggio per la diagnosi
+        steps.append(f"ERRORE al passo {len(steps) + 1}: {type(e).__name__}: {e}")
+    finally:
+        try:
+            ftp.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return "\n".join(steps)
 
 
 @mcp.tool()
