@@ -27,6 +27,17 @@ Non scrivere mai password o chiavi nel codice o in chat.
 | `S1_PASS` | password FTP |
 
 Per il secondo e il terzo server ripeti con `S2_...` e `S3_...` (fino a `S9_...`).
+
+### Backup su GitHub (facoltativo)
+
+Lo strumento `backup_to_github` copia i file di configurazione della missione (`.xml`, `.json`) in un repository GitHub, nella cartella con il nome del server. Legge soltanto dal server di gioco: non lo ferma e non lo riavvia. Carica solo i file cambiati.
+
+| Variabile | Valore |
+|---|---|
+| `GITHUB_TOKEN` | token GitHub *fine-grained* con accesso **solo** al repository di backup, permesso *Contents: Read and write* |
+| `GITHUB_REPO` | repository di backup, es. `utente/califfato-server-config` |
+| `GITHUB_BRANCH` | facoltativo, default `main` |
+| `BACKUP_MAX_BYTES` | facoltativo, dimensione massima di un file da salvare (default 3 MB) |
 Host, porta, utente e password FTP li trovi nella dashboard Nitrado del singolo servizio, sezione FTP: sono diversi per ogni server.
 
 ## 3. Collegarlo a Claude

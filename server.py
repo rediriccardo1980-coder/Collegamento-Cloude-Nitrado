@@ -8,11 +8,16 @@ Connettore MCP per i server Nitrado (DayZ console) tramite FTP.
 - Include log di diagnostica dettagliati per analizzare errori di timeout e connessione.
 """
 
+import base64
+import hashlib
 import io
+import json
 import os
 import posixpath
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from ftplib import FTP, all_errors
 
@@ -26,6 +31,15 @@ TIMEOUT = int(os.environ.get("FTP_TIMEOUT", "12"))  # secondi
 
 if not SECRET:
     raise SystemExit("Imposta SECRET_PATH oppure MCP_SECRET (stringa lunga e casuale).")
+
+# Backup su GitHub (facoltativo): token "fine-grained" limitato al solo repository di backup.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()          # es. utente/califfato-server-config
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip()
+BACKUP_EXTS = (".xml", ".json", ".txt", ".cfg")
+BACKUP_MAX_BYTES = int(os.environ.get("BACKUP_MAX_BYTES", str(3 * 1024 * 1024)))
+BACKUP_SKIP = (".bak-", ".dst-backup", ".dst-rotator-backup", ".deleted-")
+BACKUP_SKIP_DIRS = ("killfeed-pro-backups",)
 
 
 def log(msg: str):
@@ -326,6 +340,92 @@ def delete_file(server: str, path: str) -> str:
     with _ftp(server) as ftp:
         ftp.rename(p, new_name)
     return f"File messo da parte (recuperabile): {new_name}"
+
+
+# ---------- backup su GitHub (sola lettura sul server di gioco) ----------
+
+def _gh(method: str, path: str, body=None):
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}{path}",
+        method=method,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "nitrado-mcp-backup",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"GitHub {method} {path}: {e.code} {e.read()[:300]!r}") from None
+
+
+def _git_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _walk(ftp: FTP, root: str):
+    """Restituisce (percorso_assoluto, dimensione) dei file da salvare sotto root."""
+    out, todo = [], [root]
+    while todo:
+        d = todo.pop()
+        for name, facts in ftp.mlsd(d):
+            if name in (".", ".."):
+                continue
+            full = posixpath.join(d, name)
+            if facts.get("type") == "dir":
+                if name not in BACKUP_SKIP_DIRS:
+                    todo.append(full)
+                continue
+            size = int(facts.get("size", 0) or 0)
+            if (name.lower().endswith(BACKUP_EXTS) and size <= BACKUP_MAX_BYTES
+                    and not any(s in name for s in BACKUP_SKIP)):
+                out.append((full, size))
+    return sorted(out)
+
+
+@mcp.tool()
+def backup_to_github(server: str, message: str = "") -> str:
+    """Copia su GitHub i file di configurazione della missione (xml/json) del server indicato,
+    nella cartella con lo stesso nome del server. Legge soltanto dal server di gioco: non lo
+    ferma, non lo riavvia e non modifica nulla. Carica solo i file cambiati."""
+    if not (GITHUB_TOKEN and GITHUB_REPO):
+        raise RuntimeError("Backup GitHub non configurato: imposta GITHUB_TOKEN e GITHUB_REPO su Render.")
+    name = server.strip().lower()
+    log(f"Esecuzione backup_to_github su '{name}'")
+    with _ftp(name) as ftp:
+        missions = [n for n, f in ftp.mlsd("/dayzps_missions") if f.get("type") == "dir" and n not in (".", "..")]
+        if len(missions) != 1:
+            raise RuntimeError(f"Attesa una sola cartella missione, trovate: {missions}")
+        root = f"/dayzps_missions/{missions[0]}"
+        files = {}
+        for path, _size in _walk(ftp, root):
+            files[f"{name}/{posixpath.relpath(path, root)}"] = _download(ftp, path)
+
+    ref = _gh("GET", f"/git/ref/heads/{GITHUB_BRANCH}")
+    base_commit = ref["object"]["sha"]
+    base_tree = _gh("GET", f"/git/commits/{base_commit}")["tree"]["sha"]
+    existing = {e["path"]: e["sha"] for e in _gh("GET", f"/git/trees/{base_tree}?recursive=1").get("tree", [])
+                if e.get("type") == "blob"}
+
+    changed = [p for p, data in files.items() if existing.get(p) != _git_blob_sha(data)]
+    if not changed:
+        return f"{name}: nessuna modifica rispetto all'ultimo backup ({len(files)} file controllati)."
+
+    tree = []
+    for p in changed:
+        blob = _gh("POST", "/git/blobs", {"content": base64.b64encode(files[p]).decode(), "encoding": "base64"})
+        tree.append({"path": p, "mode": "100644", "type": "blob", "sha": blob["sha"]})
+    new_tree = _gh("POST", "/git/trees", {"base_tree": base_tree, "tree": tree})["sha"]
+    msg = message.strip() or f"Backup automatico {name} {time.strftime('%Y-%m-%d %H:%M')}"
+    commit = _gh("POST", "/git/commits", {"message": msg, "tree": new_tree, "parents": [base_commit]})["sha"]
+    _gh("PATCH", f"/git/refs/heads/{GITHUB_BRANCH}", {"sha": commit})
+    shown = "\n".join(f"- {p}" for p in changed[:40])
+    more = f"\n... e altri {len(changed) - 40}" if len(changed) > 40 else ""
+    return f"{name}: {len(changed)} file aggiornati su GitHub (commit {commit[:7]}).\n{shown}{more}"
 
 
 if __name__ == "__main__":
