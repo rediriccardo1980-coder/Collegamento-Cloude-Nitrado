@@ -60,4 +60,4 @@ Se riusi il servizio Render esistente e metti in `SECRET_PATH` lo stesso valore 
 ## Strumenti disponibili
 
 Lettura: `list_servers`, `list_files`, `read_file`, `find_in_file`.
-Scrittura (solo con `READ_ONLY=false`): `write_file`, `replace_in_file`, `make_dir`, `move_file`, `delete_file` (rinomina con suffisso `.deleted-…`, non cancella davvero).
+Scrittura (solo con `READ_ONLY=false`): `write_file`, `replace_in_file`, `make_dir`, `move_file`, `delete_file` (rinomina con suffisso `.deleted-…`, non cancella davvero), `copy_between_servers` (copia file o cartelle intere da un server all'altro, anche grandi o binari; salta `.bak-`/`.deleted-` e i backup del killfeed, rinomina in `.bak-…` i file che sovrascrive, si può rilanciare per riprendere; con `dry_run=true` mostra solo cosa farebbe).

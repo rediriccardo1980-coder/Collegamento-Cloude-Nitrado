@@ -15,6 +15,7 @@ import json
 import os
 import posixpath
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -79,7 +80,7 @@ mcp = FastMCP(
 def _clean(path: str) -> str:
     if ".." in path.replace("\\", "/").split("/"):
         raise ValueError("Percorso non valido: '..' non è ammesso.")
-    return posixpath.normpath("/" + path.strip())
+    return posixpath.normpath("/" + path.strip().lstrip("/"))
 
 
 def _ts() -> str:
@@ -340,6 +341,115 @@ def delete_file(server: str, path: str) -> str:
     with _ftp(server) as ftp:
         ftp.rename(p, new_name)
     return f"File messo da parte (recuperabile): {new_name}"
+
+
+# ---------- copia tra server (FTP -> FTP, anche file grandi e binari) ----------
+
+COPY_SKIP_DIRS = ("killfeed-pro-backups",)
+
+
+def _list_tree(ftp: FTP, root: str):
+    """(percorso_relativo, dimensione) di tutti i file sotto root, saltando backup e cestinati."""
+    try:
+        facts_root = dict(ftp.mlsd(posixpath.dirname(root) or "/")).get(posixpath.basename(root), {})
+    except all_errors:
+        facts_root = {}
+    if facts_root.get("type") == "file":
+        return [("", int(facts_root.get("size", 0) or 0))]
+    out, todo = [], [""]
+    while todo:
+        rel = todo.pop()
+        for name, facts in ftp.mlsd(posixpath.join(root, rel) if rel else root):
+            if name in (".", ".."):
+                continue
+            r = posixpath.join(rel, name) if rel else name
+            if facts.get("type") == "dir":
+                if name not in COPY_SKIP_DIRS:
+                    todo.append(r)
+                continue
+            if any(s in name for s in BACKUP_SKIP):
+                continue
+            out.append((r, int(facts.get("size", 0) or 0)))
+    return sorted(out)
+
+
+def _size(ftp: FTP, path: str):
+    try:
+        return ftp.size(path)
+    except all_errors:
+        return None
+
+
+def _sha1(ftp: FTP, path: str) -> str:
+    h = hashlib.sha1()
+    ftp.retrbinary(f"RETR {path}", h.update, blocksize=1 << 16)
+    return h.hexdigest()
+
+
+def _makedirs(ftp: FTP, path: str):
+    cur = ""
+    for part in [p for p in path.split("/") if p]:
+        cur += "/" + part
+        try:
+            ftp.mkd(cur)
+        except all_errors:
+            pass
+
+
+@mcp.tool()
+def copy_between_servers(source_server: str, source_path: str, dest_server: str, dest_path: str,
+                         dry_run: bool = False, max_seconds: int = 100) -> str:
+    """Copia un file o un'intera cartella da un server a un altro (anche file grandi o binari),
+    senza passare il contenuto in chat. Salta i file .bak-/.deleted- e i backup del killfeed.
+    I file già identici a destinazione vengono saltati; quelli diversi vengono prima rinominati
+    in .bak-<data>. Legge soltanto dal server di origine. Se il tempo (max_seconds) finisce,
+    rilancia lo stesso comando: riprende da dove si era fermato. dry_run=true mostra solo cosa farebbe."""
+    if not dry_run:
+        _require_write()
+    src, dst = _clean(source_path), _clean(dest_path)
+    if source_server.strip().lower() == dest_server.strip().lower() and src == dst:
+        raise ValueError("Origine e destinazione coincidono.")
+    log(f"Esecuzione copy_between_servers {source_server}:{src} -> {dest_server}:{dst} (dry_run={dry_run})")
+    t0 = time.time()
+    copied, same, pending, errors = [], 0, [], []
+    with _ftp(source_server) as fs, _ftp(dest_server) as fd:
+        files = _list_tree(fs, src)
+        for rel, size in files:
+            s = posixpath.join(src, rel) if rel else src
+            d = posixpath.join(dst, rel) if rel else dst
+            if time.time() - t0 > max_seconds:
+                pending.append(rel or posixpath.basename(src))
+                continue
+            try:
+                dsize = _size(fd, d)
+                if dsize == size and _sha1(fs, s) == _sha1(fd, d):
+                    same += 1
+                    continue
+                if dry_run:
+                    copied.append(f"{rel or posixpath.basename(src)} ({size} byte){' [sovrascrive]' if dsize is not None else ''}")
+                    continue
+                _makedirs(fd, posixpath.dirname(d))
+                if dsize is not None:
+                    fd.rename(d, f"{d}.bak-{_ts()}")
+                with tempfile.TemporaryFile() as tmp:
+                    fs.retrbinary(f"RETR {s}", tmp.write, blocksize=1 << 16)
+                    tmp.seek(0)
+                    fd.storbinary(f"STOR {d}", tmp, blocksize=1 << 16)
+                if _size(fd, d) != size:
+                    raise IOError("dimensione a destinazione diversa dopo la copia")
+                copied.append(f"{rel or posixpath.basename(src)} ({size} byte)")
+            except Exception as e:
+                errors.append(f"{rel or src}: {type(e).__name__}: {e}")
+                log(f"ERRORE copia {s}: {e}")
+    head = "SIMULAZIONE - " if dry_run else ""
+    lines = [f"{head}{len(files)} file nell'origine: {len(copied)} {'da copiare' if dry_run else 'copiati'}, "
+             f"{same} già identici, {len(pending)} rimandati per tempo, {len(errors)} errori "
+             f"({time.time() - t0:.0f}s)."]
+    lines += [f"+ {c}" for c in copied[:60]] + ([f"... e altri {len(copied) - 60}"] if len(copied) > 60 else [])
+    lines += [f"! {e}" for e in errors[:30]]
+    if pending:
+        lines.append("Tempo finito: rilancia lo stesso comando per continuare.")
+    return "\n".join(lines)
 
 
 # ---------- backup su GitHub (sola lettura sul server di gioco) ----------
