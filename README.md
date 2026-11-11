@@ -73,6 +73,21 @@ https://NOME-DEL-TUO-SERVIZIO.onrender.com/SECRET_PATH/mcp
 (al posto di `SECRET_PATH` metti il valore della variabile). Questo indirizzo è come una password: non condividerlo.
 Se riusi il servizio Render esistente e metti in `SECRET_PATH` lo stesso valore del vecchio indirizzo, il connettore in Claude non va riconfigurato.
 
+## 3b. Collegarlo anche a ChatGPT (facoltativo)
+
+Su Render aggiungi la variabile `SECRET_PATH_GPT` con un'altra stringa lunga e casuale, **diversa** da `SECRET_PATH`.
+Lo stesso servizio espone allora un secondo indirizzo, solo per ChatGPT:
+
+```
+https://NOME-DEL-TUO-SERVIZIO.onrender.com/SECRET_PATH_GPT/mcp
+```
+
+- Ha tutti gli strumenti tranne `delete_file`, `move_file`, `copy_between_servers` e `discord_delete_message`.
+- L'indirizzo di Claude non cambia.
+- Per togliere l'accesso a ChatGPT cancella `SECRET_PATH_GPT` su Render: l'indirizzo smette subito di funzionare.
+
+In ChatGPT: *Impostazioni → App e connettori → Avanzate → Modalità sviluppatore*, poi *Crea*, incolla l'indirizzo e scegli **nessuna autenticazione** (la protezione è l'indirizzo segreto, quindi non condividerlo).
+
 ## 4. Test consigliato
 
 1. Con `READ_ONLY=true`: chiedi a Claude di elencare i server, poi i file della cartella `dayzps_missions/dayzOffline.chernarusplus`.
