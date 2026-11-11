@@ -47,6 +47,10 @@ Lo strumento `backup_to_github` copia i file di configurazione della missione (`
 
 Strumenti: `discord_list_guilds`, `discord_list_channels`, `discord_read_messages`, `discord_send_message` (con `allow_everyone` per far notificare @everyone e `reply_to` per rispondere), `discord_send_embed`, `discord_edit_message`, `discord_delete_message` (solo messaggi del bot).
 
+Moderazione e gestione (ogni azione con un motivo che finisce nel registro di controllo di Discord):
+`discord_list_roles`, `discord_search_members`, `discord_get_member`, `discord_add_role` / `discord_remove_role` (rifiuta i ruoli con permessi da staff o admin), `discord_timeout_member` (0 minuti = toglie il timeout), `discord_kick_member`, `discord_ban_member` / `discord_unban_member` / `discord_list_bans`, `discord_send_dm`, `discord_add_reaction`, `discord_pin_message`, `discord_create_thread`, `discord_list_events` / `discord_create_event`, `discord_set_channel_visibility`.
+Il bot deve avere su Discord i permessi corrispondenti (Gestisci ruoli, Modera membri, Espelli, Banna, Gestisci canali, Gestisci eventi) e il suo ruolo deve stare **sopra** i ruoli che assegna.
+
 ### API Nitrado: stato e log (sola lettura)
 
 | Variabile | Valore |
