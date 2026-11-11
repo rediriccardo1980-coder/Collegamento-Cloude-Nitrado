@@ -38,6 +38,28 @@ Lo strumento `backup_to_github` copia i file di configurazione della missione (`
 | `GITHUB_REPO` | repository di backup, es. `utente/califfato-server-config` |
 | `GITHUB_BRANCH` | facoltativo, default `main` |
 | `BACKUP_MAX_BYTES` | facoltativo, dimensione massima di un file da salvare (default 3 MB) |
+### Discord nel cloud (funziona anche a PC spento)
+
+| Variabile | Valore |
+|---|---|
+| `DISCORD_BOT_TOKEN` | token del bot (Discord Developer Portal → la tua applicazione → *Bot* → *Reset Token*). Il bot deve essere già nei server Discord |
+| `DISCORD_GUILDS` | ID dei server Discord autorizzati, separati da virgola (es. `1404777365590249513,1145317853214552064`). Gli altri vengono rifiutati |
+
+Strumenti: `discord_list_guilds`, `discord_list_channels`, `discord_read_messages`, `discord_send_message` (con `allow_everyone` per far notificare @everyone e `reply_to` per rispondere), `discord_send_embed`, `discord_edit_message`, `discord_delete_message` (solo messaggi del bot).
+
+### API Nitrado: stato e log (sola lettura)
+
+| Variabile | Valore |
+|---|---|
+| `NITRADO_TOKEN` | *Long-life token* da server.nitrado.net → Il mio account → Developer Portal / Long-life tokens (permesso `service`) |
+| `S1_SERVICE_ID`, `S2_SERVICE_ID`, … | ID del servizio Nitrado di ogni server (es. Chernarus `17731864`, si vede nell'indirizzo del pannello web) |
+
+Strumenti: `nitrado_status`, `nitrado_list_logs`, `nitrado_read_log` (con filtro `grep`). Nessuno strumento ferma o riavvia i server.
+
+### File grandi senza browser
+
+`upload_from_github` prende un file dal repository di backup (`GITHUB_REPO`) e lo carica sul server via FTP, con backup e verifica. Serve che il token GitHub abbia *Contents: Read and write* (già richiesto per i backup).
+
 Host, porta, utente e password FTP li trovi nella dashboard Nitrado del singolo servizio, sezione FTP: sono diversi per ogni server.
 
 ## 3. Collegarlo a Claude
