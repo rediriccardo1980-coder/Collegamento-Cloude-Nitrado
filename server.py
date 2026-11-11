@@ -796,5 +796,58 @@ def nitrado_read_log(server: str, file_name: str, grep: str = "", tail_lines: in
     return out[-MAX_CHARS:] if out else "(nessuna riga trovata)"
 
 
+# ---------- secondo indirizzo per ChatGPT (facoltativo) ----------
+# Se SECRET_PATH_GPT è impostata, lo stesso servizio espone un secondo indirizzo
+# https://.../SECRET_PATH_GPT/mcp con tutti gli strumenti TRANNE quelli che eliminano,
+# spostano o copiano tra server. L'indirizzo di Claude resta identico.
+# Per togliere l'accesso a ChatGPT basta cancellare la variabile su Render.
+
+GPT_SECRET = (os.environ.get("SECRET_PATH_GPT") or "").strip().strip("/")
+GPT_EXCLUDED = {"delete_file", "move_file", "copy_between_servers", "discord_delete_message"}
+
+
+def _build_gpt_server():
+    if GPT_SECRET == SECRET:
+        raise SystemExit("SECRET_PATH_GPT deve essere diversa da SECRET_PATH.")
+    gpt = FastMCP(
+        "nitrado-ftp-chatgpt",
+        host="0.0.0.0",
+        port=PORT,
+        streamable_http_path=f"/{GPT_SECRET}/mcp",
+        stateless_http=True,
+    )
+    g = globals()
+    for t in mcp._tool_manager.list_tools():
+        if t.name in GPT_EXCLUDED:
+            continue
+        gpt.add_tool(g[t.name], name=t.name, description=t.description)
+    return gpt
+
+
+def _run_both():
+    import contextlib
+
+    import uvicorn
+    from starlette.applications import Starlette
+
+    gpt = _build_gpt_server()
+    claude_app = mcp.streamable_http_app()
+    gpt_app = gpt.streamable_http_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(mcp.session_manager.run())
+            await stack.enter_async_context(gpt.session_manager.run())
+            yield
+
+    app = Starlette(routes=[*claude_app.routes, *gpt_app.routes], lifespan=lifespan)
+    log(f"Indirizzo ChatGPT attivo ({len(gpt._tool_manager.list_tools())} strumenti, esclusi: {', '.join(sorted(GPT_EXCLUDED))})")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    if GPT_SECRET:
+        _run_both()
+    else:
+        mcp.run(transport="streamable-http")
