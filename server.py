@@ -587,19 +587,22 @@ DISCORD_GUILDS = {g.strip() for g in os.environ.get("DISCORD_GUILDS", "").split(
 _BOT_ID = None
 
 
-def _dc(method: str, path: str, body=None):
+def _dc(method: str, path: str, body=None, reason: str = ""):
     if not DISCORD_TOKEN:
         raise RuntimeError("Discord non configurato: imposta DISCORD_BOT_TOKEN su Render.")
+    headers = {
+        "Authorization": f"Bot {DISCORD_TOKEN}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://github.com/rediriccardo1980-coder/Collegamento-Cloude-Nitrado, 1.0)",
+    }
+    if reason:
+        headers["X-Audit-Log-Reason"] = urllib.parse.quote(reason[:512], safe=" ")
     for _ in range(3):
         req = urllib.request.Request(
             f"https://discord.com/api/v10{path}",
             method=method,
             data=json.dumps(body).encode("utf-8") if body is not None else None,
-            headers={
-                "Authorization": f"Bot {DISCORD_TOKEN}",
-                "Content-Type": "application/json",
-                "User-Agent": "DiscordBot (https://github.com/rediriccardo1980-coder/Collegamento-Cloude-Nitrado, 1.0)",
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
@@ -716,6 +719,209 @@ def discord_delete_message(channel_id: str, message_id: str) -> str:
         raise PermissionError("Posso cancellare solo i messaggi scritti dal bot.")
     _dc("DELETE", f"/channels/{int(channel_id)}/messages/{int(message_id)}")
     return "Messaggio cancellato."
+
+
+# ---------- Discord: moderazione e gestione ----------
+# Ogni azione richiede un motivo, che finisce nel registro di controllo (audit log) di Discord.
+# Per sicurezza non si possono assegnare ruoli con permessi da amministratore o di gestione.
+
+# kick, ban, admin, gestione canali, gestione server, gestione ruoli, webhook
+_DANGEROUS_PERMS = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 28) | (1 << 29)
+
+
+def _role(guild_id: str, role_id: str) -> dict:
+    for r in _dc("GET", f"/guilds/{int(guild_id)}/roles"):
+        if r["id"] == str(role_id):
+            return r
+    raise ValueError(f"Ruolo {role_id} non trovato.")
+
+
+def _member_line(m: dict) -> str:
+    u = m["user"]
+    nick = m.get("nick") or u.get("global_name") or ""
+    to = m.get("communication_disabled_until")
+    return f"{u['id']}  {u['username']}" + (f" ({nick})" if nick else "") + (f"  [timeout fino {to[:16]}]" if to else "")
+
+
+@mcp.tool()
+def discord_list_roles(guild_id: str) -> str:
+    """Elenca i ruoli di un server Discord: id, nome, posizione."""
+    _guild_ok(guild_id)
+    rs = sorted(_dc("GET", f"/guilds/{int(guild_id)}/roles"), key=lambda r: -r["position"])
+    return "\n".join(f"{r['id']}  {r['name']}  (pos {r['position']})" for r in rs)
+
+
+@mcp.tool()
+def discord_search_members(guild_id: str, query: str, limit: int = 20) -> str:
+    """Cerca membri il cui nome utente o soprannome inizia con il testo indicato."""
+    _guild_ok(guild_id)
+    ms = _dc("GET", f"/guilds/{int(guild_id)}/members/search?query={urllib.parse.quote(query)}&limit={max(1, min(int(limit), 100))}")
+    return "\n".join(_member_line(m) for m in ms) or "(nessun membro trovato)"
+
+
+@mcp.tool()
+def discord_get_member(guild_id: str, user_id: str) -> str:
+    """Dettagli di un membro: nomi, ruoli, data di ingresso, eventuale timeout."""
+    _guild_ok(guild_id)
+    m = _dc("GET", f"/guilds/{int(guild_id)}/members/{int(user_id)}")
+    names = {r["id"]: r["name"] for r in _dc("GET", f"/guilds/{int(guild_id)}/roles")}
+    roles = ", ".join(names.get(r, r) for r in m.get("roles", [])) or "nessuno"
+    return f"{_member_line(m)}\nentrato: {m.get('joined_at', '?')[:16]}\nruoli: {roles}"
+
+
+@mcp.tool()
+def discord_add_role(guild_id: str, user_id: str, role_id: str, reason: str) -> str:
+    """Assegna un ruolo a un membro (es. ruolo fazione). Rifiuta ruoli con permessi da staff/admin."""
+    _require_write()
+    _guild_ok(guild_id)
+    r = _role(guild_id, role_id)
+    if int(r.get("permissions", "0")) & _DANGEROUS_PERMS:
+        raise PermissionError(f"Il ruolo '{r['name']}' ha permessi da staff: va assegnato a mano da un admin.")
+    _dc("PUT", f"/guilds/{int(guild_id)}/members/{int(user_id)}/roles/{int(role_id)}", reason=reason)
+    return f"Ruolo '{r['name']}' assegnato."
+
+
+@mcp.tool()
+def discord_remove_role(guild_id: str, user_id: str, role_id: str, reason: str) -> str:
+    """Toglie un ruolo a un membro."""
+    _require_write()
+    _guild_ok(guild_id)
+    r = _role(guild_id, role_id)
+    _dc("DELETE", f"/guilds/{int(guild_id)}/members/{int(user_id)}/roles/{int(role_id)}", reason=reason)
+    return f"Ruolo '{r['name']}' tolto."
+
+
+@mcp.tool()
+def discord_timeout_member(guild_id: str, user_id: str, minutes: int, reason: str) -> str:
+    """Mette in timeout un membro per N minuti (max 40320 = 28 giorni). minutes=0 toglie il timeout."""
+    _require_write()
+    _guild_ok(guild_id)
+    minutes = max(0, min(int(minutes), 40320))
+    until = None if minutes == 0 else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + minutes * 60))
+    _dc("PATCH", f"/guilds/{int(guild_id)}/members/{int(user_id)}", {"communication_disabled_until": until}, reason=reason)
+    return "Timeout tolto." if until is None else f"Timeout fino a {until} (UTC)."
+
+
+@mcp.tool()
+def discord_kick_member(guild_id: str, user_id: str, reason: str) -> str:
+    """Espelle un membro dal server Discord (può rientrare con un invito)."""
+    _require_write()
+    _guild_ok(guild_id)
+    _dc("DELETE", f"/guilds/{int(guild_id)}/members/{int(user_id)}", reason=reason)
+    return "Membro espulso."
+
+
+@mcp.tool()
+def discord_ban_member(guild_id: str, user_id: str, reason: str) -> str:
+    """Banna un membro dal server Discord. Non cancella i suoi messaggi."""
+    _require_write()
+    _guild_ok(guild_id)
+    _dc("PUT", f"/guilds/{int(guild_id)}/bans/{int(user_id)}", {"delete_message_seconds": 0}, reason=reason)
+    return "Membro bannato."
+
+
+@mcp.tool()
+def discord_unban_member(guild_id: str, user_id: str, reason: str) -> str:
+    """Toglie il ban a un utente."""
+    _require_write()
+    _guild_ok(guild_id)
+    _dc("DELETE", f"/guilds/{int(guild_id)}/bans/{int(user_id)}", reason=reason)
+    return "Ban tolto."
+
+
+@mcp.tool()
+def discord_list_bans(guild_id: str, limit: int = 50) -> str:
+    """Elenca gli utenti bannati con il motivo."""
+    _guild_ok(guild_id)
+    bs = _dc("GET", f"/guilds/{int(guild_id)}/bans?limit={max(1, min(int(limit), 1000))}")
+    return "\n".join(f"{b['user']['id']}  {b['user']['username']}  — {b.get('reason') or 'nessun motivo'}" for b in bs) or "(nessun ban)"
+
+
+@mcp.tool()
+def discord_send_dm(user_id: str, content: str) -> str:
+    """Invia un messaggio privato a un utente (deve essere in uno dei server autorizzati)."""
+    _require_write()
+    if DISCORD_GUILDS and not any(_try_member(g, user_id) for g in DISCORD_GUILDS):
+        raise PermissionError("L'utente non è in nessuno dei server autorizzati.")
+    ch = _dc("POST", "/users/@me/channels", {"recipient_id": str(int(user_id))})
+    m = _dc("POST", f"/channels/{ch['id']}/messages", {"content": content, "allowed_mentions": {"parse": []}})
+    return f"Messaggio privato inviato (id {m['id']})."
+
+
+def _try_member(guild_id: str, user_id: str) -> bool:
+    try:
+        _dc("GET", f"/guilds/{int(guild_id)}/members/{int(user_id)}")
+        return True
+    except RuntimeError:
+        return False
+
+
+@mcp.tool()
+def discord_add_reaction(channel_id: str, message_id: str, emoji: str) -> str:
+    """Aggiunge una reazione (emoji unicode, es. ✅) a un messaggio."""
+    _require_write()
+    _channel(channel_id)
+    _dc("PUT", f"/channels/{int(channel_id)}/messages/{int(message_id)}/reactions/{urllib.parse.quote(emoji)}/@me")
+    return "Reazione aggiunta."
+
+
+@mcp.tool()
+def discord_pin_message(channel_id: str, message_id: str, pin: bool = True) -> str:
+    """Fissa (pin=true) o sblocca (pin=false) un messaggio in un canale."""
+    _require_write()
+    _channel(channel_id)
+    _dc("PUT" if pin else "DELETE", f"/channels/{int(channel_id)}/pins/{int(message_id)}")
+    return "Messaggio fissato." if pin else "Messaggio non più fissato."
+
+
+@mcp.tool()
+def discord_create_thread(channel_id: str, name: str, message_id: str = "", private: bool = False) -> str:
+    """Crea un thread in un canale: da un messaggio (message_id) oppure vuoto (private=true per thread privato)."""
+    _require_write()
+    _channel(channel_id)
+    if message_id:
+        t = _dc("POST", f"/channels/{int(channel_id)}/messages/{int(message_id)}/threads", {"name": name[:100]})
+    else:
+        t = _dc("POST", f"/channels/{int(channel_id)}/threads", {"name": name[:100], "type": 12 if private else 11})
+    return f"Thread creato (id {t['id']})."
+
+
+@mcp.tool()
+def discord_list_events(guild_id: str) -> str:
+    """Elenca gli eventi programmati del server."""
+    _guild_ok(guild_id)
+    ev = _dc("GET", f"/guilds/{int(guild_id)}/scheduled-events")
+    return "\n".join(f"{e['id']}  {e['scheduled_start_time'][:16]}  {e['name']}" for e in ev) or "(nessun evento)"
+
+
+@mcp.tool()
+def discord_create_event(guild_id: str, name: str, start_iso: str, end_iso: str, location: str,
+                         description: str = "") -> str:
+    """Crea un evento programmato "esterno" (es. KOTH in gioco). Orari ISO con fuso, es. 2026-11-21T21:30:00+01:00."""
+    _require_write()
+    _guild_ok(guild_id)
+    e = _dc("POST", f"/guilds/{int(guild_id)}/scheduled-events", {
+        "name": name[:100], "description": description[:1000], "privacy_level": 2, "entity_type": 3,
+        "scheduled_start_time": start_iso, "scheduled_end_time": end_iso,
+        "entity_metadata": {"location": location[:100]}})
+    return f"Evento creato (id {e['id']})."
+
+
+@mcp.tool()
+def discord_set_channel_visibility(channel_id: str, role_id: str, visible: bool, reason: str) -> str:
+    """Mostra o nasconde un canale a un ruolo (per @everyone usa l'id del server come role_id)."""
+    _require_write()
+    ch = _channel(channel_id)
+    view = 1 << 10
+    cur = next((o for o in ch.get("permission_overwrites", []) if o["id"] == str(role_id)), None)
+    allow, deny = (int(cur["allow"]), int(cur["deny"])) if cur else (0, 0)
+    if visible:
+        allow, deny = allow | view, deny & ~view
+    else:
+        allow, deny = allow & ~view, deny | view
+    body = {"type": int(cur["type"]) if cur else 0, "allow": str(allow), "deny": str(deny)}
+    _dc("PUT", f"/channels/{int(channel_id)}/permissions/{int(role_id)}", body, reason=reason)
+    return "Canale ora visibile al ruolo." if visible else "Canale ora nascosto al ruolo."
 
 
 # ---------- API Nitrado: stato e log del server (sola lettura) ----------
