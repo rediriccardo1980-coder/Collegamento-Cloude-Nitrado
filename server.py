@@ -650,9 +650,18 @@ def discord_list_channels(guild_id: str) -> str:
     """Elenca i canali di un server Discord: id, tipo, categoria e nome."""
     _guild_ok(guild_id)
     chs = _dc("GET", f"/guilds/{int(guild_id)}/channels")
-    cats = {c["id"]: c["name"] for c in chs if c["type"] == 4}
-    rows = sorted((cats.get(c.get("parent_id"), "-"), c.get("position", 0), c) for c in chs if c["type"] != 4)
-    return "\n".join(f"{c['id']}  [{cat}]  {c['name']}" for cat, _p, c in rows)
+    cats = {c["id"]: c for c in chs if c["type"] == 4}
+
+    def _key(c):
+        cat = cats.get(c.get("parent_id"))
+        # Ordina per posizione della categoria, poi del canale; l'id evita confronti tra dict a parità.
+        return (cat.get("position", 0) if cat else -1, c.get("position", 0), int(c["id"]))
+
+    rows = sorted((c for c in chs if c["type"] != 4), key=_key)
+    return "\n".join(
+        f"{c['id']}  [{cats[c['parent_id']]['name'] if c.get('parent_id') in cats else '-'}]  {c['name']}"
+        for c in rows
+    )
 
 
 @mcp.tool()
